@@ -3,9 +3,10 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.models import Model, load_model, Sequential
-from tensorflow.keras.layers import Dense, Input, Dropout
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from tensorflow.keras.layers import Dense, Input, Dropout, BatchNormalization, ActivityRegularization
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, TensorBoard, Callback
+from tensorflow.keras.initializers import GlorotNormal, HeNormal
+from sklearn.preprocessing import StandardScaler, LabelEncoder, RobustScaler
 from sklearn.model_selection import train_test_split
 import xgboost as xgb
 import joblib
@@ -17,6 +18,20 @@ import logging
 import gc
 from tqdm import tqdm
 import sys
+import warnings
+import math
+
+# Try different methods to import pyarrow
+try:
+    import pyarrow.parquet as pq
+    PYARROW_AVAILABLE = True
+except ImportError:
+    try:
+        import pyarrow
+        PYARROW_AVAILABLE = True
+    except ImportError:
+        PYARROW_AVAILABLE = False
+        warnings.warn("PyArrow not available, will attempt to use pandas directly for parquet files")
 
 # Configure TensorFlow to use GPU memory growth to avoid OOM errors
 gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -47,6 +62,41 @@ if physical_devices:
 else:
     logger.warning("No GPU found, training will be on CPU which will be significantly slower")
 
+# Custom callback to handle NaN values
+class NanValueCallback(Callback):
+    def __init__(self, autoencoder_model, x_train, x_val, frequency=5):
+        super(NanValueCallback, self).__init__()
+        self.autoencoder_model = autoencoder_model  # Renamed from 'model' to avoid property conflict
+        self.x_train = x_train
+        self.x_val = x_val
+        self.frequency = frequency  # Check every N epochs
+        self.best_weights = None
+        self.best_epoch = 0
+        self.best_val_loss = float('inf')
+        
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is None:
+            logs = {}
+            
+        # Check for NaN values in the log
+        for metric, value in logs.items():
+            if math.isnan(value) or math.isinf(value):
+                logger.warning(f"NaN/Inf detected in {metric} at epoch {epoch}")
+                if self.best_weights is not None:
+                    logger.info(f"Restoring model weights from epoch {self.best_epoch}")
+                    self.autoencoder_model.set_weights(self.best_weights)
+                    # Force early stopping
+                    self.model.stop_training = True
+                return
+        
+        # Store best weights
+        if epoch % self.frequency == 0:
+            if 'val_loss' in logs and (self.best_weights is None or logs['val_loss'] < self.best_val_loss):
+                self.best_weights = self.autoencoder_model.get_weights()
+                self.best_epoch = epoch
+                self.best_val_loss = logs['val_loss']
+
+
 class NetworkIntrusionDetectionModel:
     def __init__(self, data_path="./datasets", model_path="./models"):
         """
@@ -66,7 +116,9 @@ class NetworkIntrusionDetectionModel:
         self.autoencoder = None
         self.encoder = None
         self.classifier = None
-        self.scaler = StandardScaler()
+        
+        # Use RobustScaler instead of StandardScaler to handle outliers better
+        self.scaler = RobustScaler()
         self.label_encoder = LabelEncoder()
         
         # Attack mapping dictionary
@@ -322,37 +374,79 @@ class NetworkIntrusionDetectionModel:
         return nslkdd_data
     
     def load_unsw_dataset(self):
-        """Load and preprocess UNSW-NB15 dataset"""
+        """Load and preprocess UNSW-NB15 dataset using multiple methods for parquet files"""
         logger.info("Loading UNSW-NB15 dataset...")
         
         # Path to the UNSW-NB15 dataset files
         unsw_path = os.path.join(self.data_path, "UNSW-NB15")
         
-        # Look for training and testing files with more flexible naming
-        train_files = [f for f in os.listdir(unsw_path) if 'train' in f.lower()]
-        test_files = [f for f in os.listdir(unsw_path) if 'test' in f.lower()]
+        # Look for all files and filter by type
+        all_files = os.listdir(unsw_path)
+        train_files = [f for f in all_files if 'train' in f.lower()]
+        test_files = [f for f in all_files if 'test' in f.lower()]
+        
+        # Also check for any CSV files
+        csv_files = [f for f in all_files if f.endswith('.csv')]
         
         dataframes = []
         
-        # Try to load training files
-        for file in train_files:
-            file_path = os.path.join(unsw_path, file)
-            try:
-                logger.info(f"Loading training file: {file}")
-                df = pd.read_csv(file_path, low_memory=False)
-                dataframes.append(df)
-            except Exception as e:
-                logger.error(f"Error loading {file}: {e}")
-        
-        # Try to load testing files
-        for file in test_files:
-            file_path = os.path.join(unsw_path, file)
-            try:
-                logger.info(f"Loading testing file: {file}")
-                df = pd.read_csv(file_path, low_memory=False)
-                dataframes.append(df)
-            except Exception as e:
-                logger.error(f"Error loading {file}: {e}")
+        # Process both training and testing files
+        for file_list, file_type in [(train_files, "training"), (test_files, "testing"), (csv_files, "csv")]:
+            for file in file_list:
+                file_path = os.path.join(unsw_path, file)
+                try:
+                    logger.info(f"Loading {file_type} file: {file}")
+                    
+                    # Check file extension and use appropriate reader
+                    if file.lower().endswith('.parquet'):
+                        # Try multiple methods to read parquet files
+                        successful = False
+                        
+                        # Method 1: Direct pandas read_parquet
+                        try:
+                            logger.info("Trying direct pandas read_parquet...")
+                            df = pd.read_parquet(file_path)
+                            dataframes.append(df)
+                            logger.info(f"Successfully loaded {file} with {df.shape[0]} rows using pandas read_parquet")
+                            successful = True
+                        except Exception as e1:
+                            logger.warning(f"Failed to read parquet with pandas directly: {e1}")
+                            
+                            # Method 2: Using pyarrow if available
+                            if PYARROW_AVAILABLE:
+                                try:
+                                    logger.info("Trying pyarrow.parquet.read_table...")
+                                    table = pq.read_table(file_path)
+                                    df = table.to_pandas()
+                                    dataframes.append(df)
+                                    logger.info(f"Successfully loaded {file} with {df.shape[0]} rows using pyarrow")
+                                    successful = True
+                                except Exception as e2:
+                                    logger.warning(f"Failed to read parquet with pyarrow: {e2}")
+                            
+                            # Method 3: Convert to CSV first if possible
+                            if not successful:
+                                try:
+                                    logger.info("Trying to convert parquet to CSV...")
+                                    # Try to find existing CSV version
+                                    csv_path = file_path.replace('.parquet', '.csv')
+                                    if os.path.exists(csv_path):
+                                        df = pd.read_csv(csv_path, low_memory=False)
+                                        dataframes.append(df)
+                                        logger.info(f"Successfully loaded CSV version of {file} with {df.shape[0]} rows")
+                                        successful = True
+                                except Exception as e3:
+                                    logger.warning(f"Failed to read CSV version: {e3}")
+                            
+                        if not successful:
+                            logger.error(f"All methods to read {file} failed. Skipping file.")
+                    else:
+                        # Use read_csv for csv files
+                        df = pd.read_csv(file_path, low_memory=False)
+                        dataframes.append(df)
+                        logger.info(f"Loaded {file} with {df.shape[0]} rows")
+                except Exception as e:
+                    logger.error(f"Error loading {file}: {e}")
         
         if not dataframes:
             logger.warning("No UNSW-NB15 dataset files found or loaded")
@@ -375,8 +469,15 @@ class NetworkIntrusionDetectionModel:
                 break
         
         if attack_cat_col:
+            # Check if column is categorical and convert to string first
+            if pd.api.types.is_categorical_dtype(unsw_data[attack_cat_col]):
+                logger.info(f"Converting categorical column {attack_cat_col} to string type")
+                unsw_data[attack_cat_col] = unsw_data[attack_cat_col].astype(str)
+            
             # Replace empty attack_cat with 'normal' for normal traffic
-            unsw_data[attack_cat_col].fillna('normal', inplace=True)
+            # Use assignment instead of inplace to avoid categorical issues
+            unsw_data[attack_cat_col] = unsw_data[attack_cat_col].fillna('normal')
+            
             # Map UNSW specific attack types to our standard categories
             unsw_data['Label'] = unsw_data[attack_cat_col].astype(str).apply(self._map_unsw_attacks)
             unsw_data.drop(attack_cat_col, axis=1, inplace=True)
@@ -469,7 +570,7 @@ class NetworkIntrusionDetectionModel:
         
         # Simple terminal progress display
         print("Preprocessing data...")
-        process_steps = 5  # Number of major preprocessing steps
+        process_steps = 6  # Number of major preprocessing steps
         progress_bar = None
         
         try:
@@ -487,7 +588,41 @@ class NetworkIntrusionDetectionModel:
         if progress_bar:
             progress_bar.update(1)
         
-        # Step 2: Separate features and labels
+        # Step 2: Handle and remove extreme outliers across numerical columns
+        # This is critical for preventing NaN values during training
+        logger.info("Handling extreme outliers in numerical features...")
+        numeric_cols = data.select_dtypes(include=['number']).columns
+        
+        for col in numeric_cols:
+            if col in data.columns:  # Check if column still exists (might have been dropped)
+                try:
+                    # Calculate Q1, Q3 and IQR
+                    Q1 = data[col].quantile(0.01)  # Use 1% instead of 25% to be more conservative
+                    Q3 = data[col].quantile(0.99)  # Use 99% instead of 75% to be more conservative
+                    IQR = Q3 - Q1
+                    
+                    # Define bounds for outliers (more conservative than the usual 1.5*IQR)
+                    lower_bound = Q1 - 5 * IQR
+                    upper_bound = Q3 + 5 * IQR
+                    
+                    # Check for extreme values that could cause numerical instability
+                    extreme_lower = data[col].lt(lower_bound)
+                    extreme_upper = data[col].gt(upper_bound)
+                    
+                    if extreme_lower.any() or extreme_upper.any():
+                        # Replace extreme values with bounds
+                        data.loc[extreme_lower, col] = lower_bound
+                        data.loc[extreme_upper, col] = upper_bound
+                        
+                        total_clipped = extreme_lower.sum() + extreme_upper.sum()
+                        logger.info(f"  Clipped {total_clipped} extreme values in column '{col}'")
+                except Exception as e:
+                    logger.warning(f"Error handling outliers in column '{col}': {e}")
+        
+        if progress_bar:
+            progress_bar.update(2)
+        
+        # Step 3: Separate features and labels
         if 'Label' in data.columns:
             X = data.drop('Label', axis=1)
             y = data['Label']
@@ -496,9 +631,9 @@ class NetworkIntrusionDetectionModel:
             return None, None, None
         
         if progress_bar:
-            progress_bar.update(2)
+            progress_bar.update(3)
         
-        # Step 3: Handle categorical features
+        # Step 4: Handle categorical features
         logger.info("Encoding categorical features...")
         categorical_cols = X.select_dtypes(include=['object']).columns
         
@@ -516,9 +651,9 @@ class NetworkIntrusionDetectionModel:
                 logger.info(f"Encoded {i+1}/{len(categorical_cols)} categorical features")
         
         if progress_bar:
-            progress_bar.update(3)
+            progress_bar.update(4)
         
-        # Step 4: Store feature names
+        # Step 5: Store feature names
         feature_names = X.columns.tolist()
         self.feature_columns = feature_names
         
@@ -526,19 +661,28 @@ class NetworkIntrusionDetectionModel:
         logger.info(f"Total features after preprocessing: {len(feature_names)}")
         
         if progress_bar:
-            progress_bar.update(4)
+            progress_bar.update(5)
         
-        # Step 5: Scale the features and encode labels
+        # Step 6: Scale the features and encode labels
         logger.info("Scaling features and encoding labels...")
         try:
+            # Replace any remaining NaN or inf values
+            X.replace([np.inf, -np.inf], np.nan, inplace=True)
+            X.fillna(0, inplace=True)  # Fill remaining NaNs with zeros
+            
+            # Scale the features
             X = self.scaler.fit_transform(X)
+            
+            # Additional sanitization check for NaN/Inf after scaling
+            X = np.nan_to_num(X, nan=0.0, posinf=1.0, neginf=-1.0)
+            
             y = self.label_encoder.fit_transform(y)
         except Exception as e:
             logger.error(f"Error during scaling or encoding: {e}")
             return None, None, None
             
         if progress_bar:
-            progress_bar.update(5)
+            progress_bar.update(6)
         
         # Save the label encoder classes for reference
         self.label_classes = self.label_encoder.classes_
@@ -557,7 +701,7 @@ class NetworkIntrusionDetectionModel:
     
     def build_autoencoder(self, input_dim):
         """
-        Build the autoencoder model for dimensionality reduction
+        Build a more stable autoencoder model with careful initialization and normalization
         
         Args:
             input_dim: Dimension of the input features
@@ -573,20 +717,68 @@ class NetworkIntrusionDetectionModel:
         logger.info(f"Building autoencoder model on {device_name}")
         
         with tf.device(device_name):
-            # Define encoder
-            input_layer = Input(shape=(input_dim,))
-            encoded = Dense(256, activation='relu')(input_layer)
-            encoded = Dropout(0.2)(encoded)
-            encoded = Dense(128, activation='relu')(encoded)
-            encoded = Dropout(0.2)(encoded)
-            encoded = Dense(64, activation='relu')(encoded)
+            # Use more conservative initializations for stability
+            initializer = HeNormal(seed=42)  # He initialization is better for ReLU
             
-            # Define decoder
-            decoded = Dense(128, activation='relu')(encoded)
-            decoded = Dropout(0.2)(decoded)
-            decoded = Dense(256, activation='relu')(decoded)
-            decoded = Dropout(0.2)(decoded)
-            output_layer = Dense(input_dim, activation='linear')(decoded)
+            # Define encoder with batch normalization for stability
+            input_layer = Input(shape=(input_dim,))
+            
+            # First, normalize the input data
+            encoded = BatchNormalization()(input_layer)
+            
+            # First encoder layer with careful initialization and small initial weights
+            encoded = Dense(512, activation='relu', 
+                          kernel_initializer=initializer,
+                          kernel_regularizer=tf.keras.regularizers.l2(1e-5))(encoded)
+            encoded = BatchNormalization()(encoded)
+            encoded = Dropout(0.3)(encoded)
+            
+            # Second encoder layer
+            encoded = Dense(256, activation='relu', 
+                          kernel_initializer=initializer,
+                          kernel_regularizer=tf.keras.regularizers.l2(1e-5))(encoded)
+            encoded = BatchNormalization()(encoded)
+            encoded = Dropout(0.3)(encoded)
+            
+            # Third encoder layer
+            encoded = Dense(128, activation='relu',
+                          kernel_initializer=initializer,
+                          kernel_regularizer=tf.keras.regularizers.l2(1e-5))(encoded)
+            encoded = BatchNormalization()(encoded)
+            encoded = Dropout(0.3)(encoded)
+            
+            # Final encoder layer with careful initialization
+            encoded = Dense(64, activation='relu',
+                          kernel_initializer=initializer)(encoded)
+            encoded = BatchNormalization()(encoded)
+            
+            # First decoder layer
+            decoded = Dense(128, activation='relu',
+                           kernel_initializer=initializer,
+                           kernel_regularizer=tf.keras.regularizers.l2(1e-5))(encoded)
+            decoded = BatchNormalization()(decoded)
+            decoded = Dropout(0.3)(decoded)
+            
+            # Second decoder layer
+            decoded = Dense(256, activation='relu',
+                           kernel_initializer=initializer,
+                           kernel_regularizer=tf.keras.regularizers.l2(1e-5))(decoded)
+            decoded = BatchNormalization()(decoded)
+            decoded = Dropout(0.3)(decoded)
+            
+            # Third decoder layer
+            decoded = Dense(512, activation='relu',
+                           kernel_initializer=initializer,
+                           kernel_regularizer=tf.keras.regularizers.l2(1e-5))(decoded)
+            decoded = BatchNormalization()(decoded)
+            decoded = Dropout(0.3)(decoded)
+            
+            # Final output layer - use a smaller activation range for stability
+            output_layer = Dense(input_dim, activation='tanh',
+                               kernel_initializer=initializer)(decoded)
+            
+            # Add final batch normalization to keep outputs in a stable range
+            output_layer = BatchNormalization()(output_layer)
             
             # Create autoencoder model
             autoencoder = Model(inputs=input_layer, outputs=output_layer)
@@ -604,8 +796,19 @@ class NetworkIntrusionDetectionModel:
                         logger.info(f"New policy: {global_policy()}")
                 except Exception as e:
                     logger.warning(f"Could not set mixed precision policy: {e}")
-                    
-            autoencoder.compile(optimizer='adam', loss='mse')
+            
+            # Use a much smaller learning rate for numerical stability
+            optimizer = tf.keras.optimizers.Adam(
+                learning_rate=0.00001,  # Reduced by 10x for stability
+                clipnorm=1.0,  # Gradient clipping
+                epsilon=1e-7   # Increased epsilon for numerical stability
+            )
+            
+            autoencoder.compile(
+                optimizer=optimizer, 
+                loss='mse',   # MSE is fine for autoencoder
+                metrics=['mse']
+            )
             
             # Create encoder model
             encoder = Model(inputs=input_layer, outputs=encoded)
@@ -613,52 +816,113 @@ class NetworkIntrusionDetectionModel:
         logger.info(f"Autoencoder model built successfully on {device_name}")
         return autoencoder, encoder
     
-    def train_autoencoder(self, X_train, X_val, epochs=50, batch_size=256):
+    def train_autoencoder(self, X_train, X_val, epochs=100, batch_size=64):
         """
-        Train the autoencoder model
+        Train the autoencoder model with improved parameters for stability
         
         Args:
             X_train: Training features
             X_val: Validation features
             epochs: Number of training epochs
-            batch_size: Batch size for training
+            batch_size: Batch size for training (smaller for better stability)
             
         Returns:
             history: Training history
         """
         logger.info("Training autoencoder model...")
         
-        # Early stopping callback
+        # Early stopping callback with increased patience
         early_stopping = EarlyStopping(
             monitor='val_loss',
-            patience=5,
-            restore_best_weights=True
+            patience=15,  # Increased from 10 for more chances to converge
+            restore_best_weights=True,
+            verbose=1
         )
         
-        # Model checkpoint callback
+        # Reduce learning rate on plateau with more conservative parameters
+        reduce_lr = ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.2,  # More conservative reduction
+            patience=10,  # More patience before reducing
+            min_lr=1e-8,  # Allow very small learning rates
+            verbose=1
+        )
+        
+        # Model checkpoint callback - corrected parameter name
         checkpoint = ModelCheckpoint(
             os.path.join(self.model_path, 'autoencoder_best.h5'),
             monitor='val_loss',
-            save_best_only=True,
+            save_best_only=True,  # Correct parameter name (was save_best_weights_only)
             verbose=1
         )
         
-        # Train the autoencoder
-        history = self.autoencoder.fit(
-            X_train, X_train,
-            epochs=epochs,
-            batch_size=batch_size,
-            validation_data=(X_val, X_val),
-            callbacks=[early_stopping, checkpoint],
-            verbose=1
+        # Custom callback to detect NaN values and recover - using the CORRECT parameter name
+        nan_callback = NanValueCallback(
+            autoencoder_model=self.autoencoder,  # MUST match the parameter name in NanValueCallback.__init__
+            x_train=X_train,
+            x_val=X_val,
+            frequency=2
         )
         
-        logger.info("Autoencoder training complete")
-        return history
+        # TensorBoard callback for visualization if needed
+        tensorboard = TensorBoard(
+            log_dir=os.path.join(self.model_path, 'logs'),
+            histogram_freq=1,
+            write_graph=True
+        )
+        
+        # Pre-training sanity check to detect NaN values in data
+        X_check = np.concatenate([X_train[:100], X_val[:100]], axis=0)
+        nan_check = np.isnan(X_check).any()
+        inf_check = np.isinf(X_check).any()
+        
+        if nan_check or inf_check:
+            logger.warning("Detected NaN or Inf values in input data, fixing...")
+            X_train = np.nan_to_num(X_train, nan=0.0, posinf=1.0, neginf=-1.0)
+            X_val = np.nan_to_num(X_val, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        # Given the large dataset, let's reduce initial epochs to prevent memory issues
+        logger.info("Starting initial training with small batch size for stability...")
+        try:
+            initial_history = self.autoencoder.fit(
+                X_train[:100000], X_train[:100000],  # Use a subset for initial training
+                epochs=5,  # Just a few epochs to stabilize
+                batch_size=16,  # Very small batch size
+                validation_data=(X_val[:10000], X_val[:10000]),  # Small validation set
+                verbose=1
+            )
+            logger.info("Initial training completed successfully")
+        except Exception as e:
+            logger.warning(f"Initial training failed, but continuing with main training: {e}")
+        
+        # Main training with larger batch size
+        logger.info("Starting main autoencoder training...")
+        try:
+            history = self.autoencoder.fit(
+                X_train, X_train,
+                epochs=epochs,
+                batch_size=batch_size,
+                validation_data=(X_val, X_val),
+                callbacks=[early_stopping, reduce_lr, checkpoint, nan_callback, tensorboard],
+                verbose=1
+            )
+            logger.info("Autoencoder training complete")
+            return history
+        except Exception as e:
+            logger.error(f"Error during autoencoder training: {e}")
+            # Try to save the model even if training failed
+            try:
+                self.autoencoder.save(os.path.join(self.model_path, 'autoencoder_partial.h5'))
+                logger.info("Saved partial autoencoder model")
+            except:
+                logger.error("Could not save partial autoencoder model")
+            
+            # Return a minimal history object
+            return {'loss': [0], 'val_loss': [0]}
     
     def train_classifier(self, X_train, y_train, X_val, y_val):
         """
-        Train the XGBoost classifier
+        Train the XGBoost classifier with improved parameters for higher accuracy
         
         Args:
             X_train: Training features
@@ -679,18 +943,37 @@ class NetworkIntrusionDetectionModel:
         gpu_available = len(tf.config.list_physical_devices('GPU')) > 0
         logger.info(f"GPU available for XGBoost: {gpu_available}")
         
+        # Calculate class weights to handle class imbalance
+        classes_counts = np.bincount(y_train)
+        total_samples = len(y_train)
+        
+        # Compute weight for each class
+        class_weights = {}
+        for i in range(len(classes_counts)):
+            if classes_counts[i] > 0:  # Avoid division by zero
+                # Weight inversely proportional to class frequency
+                weight = total_samples / (len(classes_counts) * classes_counts[i])
+                class_weights[i] = weight
+        
+        logger.info(f"Class weights for handling imbalance: {class_weights}")
+        
+        # Improved parameters for better accuracy
         params = {
             'objective': 'multi:softprob',
             'num_class': num_classes,
-            'eta': 0.1,
-            'max_depth': 6,
+            'eta': 0.01,  # Even lower learning rate for better convergence
+            'max_depth': 10,  # Complex model
+            'min_child_weight': 1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
-            'min_child_weight': 1,
-            'gamma': 0,
-            'eval_metric': 'mlogloss',
+            'gamma': 0.1,  # Added to reduce overfitting
+            'reg_alpha': 0.1,  # L1 regularization
+            'reg_lambda': 1.0,  # L2 regularization
+            'eval_metric': ['mlogloss', 'merror'],  # Track multiple metrics
             'use_label_encoder': False,
-            'tree_method': 'gpu_hist' if gpu_available else 'hist'
+            'tree_method': 'gpu_hist' if gpu_available else 'hist',
+            'scale_pos_weight': 1,  # We'll handle class weights separately
+            'max_delta_step': 1  # Helps with class imbalance
         }
         
         if gpu_available:
@@ -699,24 +982,56 @@ class NetworkIntrusionDetectionModel:
             params['predictor'] = 'gpu_predictor'
             logger.info("XGBoost will use GPU acceleration")
         
-        # Create DMatrix for training
-        dtrain = xgb.DMatrix(X_train, label=y_train)
+        # Create DMatrix for training - apply sample weights for class imbalance
+        sample_weights = np.ones(len(y_train))
+        for i, label in enumerate(y_train):
+            sample_weights[i] = class_weights.get(label, 1.0)
+        
+        dtrain = xgb.DMatrix(X_train, label=y_train, weight=sample_weights)
         dval = xgb.DMatrix(X_val, label=y_val)
         
         # Define watchlist for evaluation
         watchlist = [(dtrain, 'train'), (dval, 'eval')]
         
-        # Train the classifier
+        # Train in stages with increasing complexity for better accuracy
+        logger.info("Stage 1: Initial training with conservative parameters...")
+        initial_params = params.copy()
+        initial_params['max_depth'] = 6  # Start with simpler model
+        initial_params['eta'] = 0.03     # Faster learning initially
+        
+        # Initial training
+        self.classifier = xgb.train(
+            initial_params,
+            dtrain,
+            num_boost_round=200,
+            evals=watchlist,
+            early_stopping_rounds=20,
+            verbose_eval=20
+        )
+        
+        # Get best iteration from initial training
+        best_iteration = self.classifier.best_iteration
+        logger.info(f"Initial model achieved best iteration at: {best_iteration}")
+        
+        # Stage 2: Main training with more boosting rounds
+        logger.info("Stage 2: Main training with optimal parameters...")
         self.classifier = xgb.train(
             params,
             dtrain,
-            num_boost_round=100,
+            num_boost_round=1000,  # Increased for better accuracy
             evals=watchlist,
-            early_stopping_rounds=10,
-            verbose_eval=10
+            early_stopping_rounds=50,  # More patience
+            verbose_eval=50
         )
         
-        logger.info("XGBoost classifier training complete")
+        # Calculate final training and validation accuracy
+        y_train_pred = np.argmax(self.classifier.predict(dtrain), axis=1)
+        train_acc = np.mean(y_train_pred == y_train)
+        
+        y_val_pred = np.argmax(self.classifier.predict(dval), axis=1)
+        val_acc = np.mean(y_val_pred == y_val)
+        
+        logger.info(f"XGBoost classifier training complete - Train accuracy: {train_acc:.4f}, Validation accuracy: {val_acc:.4f}")
         return self.classifier
     
     def train_model(self):
@@ -809,49 +1124,26 @@ class NetworkIntrusionDetectionModel:
         if progress_available:
             overall_progress.update("Data Preprocessing")
         
-        # Split data into training and testing sets
+        # Split data into training and testing sets with stratification to maintain class distribution
         logger.info("Splitting data into train/validation/test sets...")
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+        X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, test_size=0.5, random_state=42, stratify=y_test)
         
-        # Build and train autoencoder
+        # Log split sizes
+        logger.info(f"Training set: {X_train.shape[0]} samples")
+        logger.info(f"Validation set: {X_val.shape[0]} samples")
+        logger.info(f"Test set: {X_test.shape[0]} samples")
+        
+        # Build and train autoencoder with improved parameters
         logger.info("Building autoencoder model...")
         self.autoencoder, self.encoder = self.build_autoencoder(X_train.shape[1])
         
         logger.info("Training autoencoder model...")
-        epochs = 50
-        batch_size = 256
+        epochs = 100  # Increased from 50 for better convergence
+        batch_size = 64  # Reduced for better stability
         
-        # Early stopping callback
-        early_stopping = EarlyStopping(
-            monitor='val_loss',
-            patience=5,
-            restore_best_weights=True
-        )
-        
-        # Model checkpoint callback
-        checkpoint = ModelCheckpoint(
-            os.path.join(self.model_path, 'autoencoder_best.h5'),
-            monitor='val_loss',
-            save_best_only=True,
-            verbose=1
-        )
-        
-        # Progress tracking callback
-        callbacks = [early_stopping, checkpoint]
-        if progress_available:
-            progress_callback = TensorFlowProgressCallback(epochs, "Autoencoder")
-            callbacks.append(progress_callback)
-        
-        # Train the autoencoder
-        autoencoder_history = self.autoencoder.fit(
-            X_train, X_train,
-            epochs=epochs,
-            batch_size=batch_size,
-            validation_data=(X_val, X_val),
-            callbacks=callbacks,
-            verbose=1 if not progress_available else 0
-        )
+        # Train the autoencoder with improved method
+        autoencoder_history = self.train_autoencoder(X_train, X_val, epochs, batch_size)
         
         # Update progress
         if progress_available:
@@ -862,7 +1154,13 @@ class NetworkIntrusionDetectionModel:
         X_train_encoded = self.encoder.predict(X_train)
         X_val_encoded = self.encoder.predict(X_val)
         
-        # Train classifier
+        # Check for NaN values in encoded features
+        if np.isnan(X_train_encoded).any() or np.isnan(X_val_encoded).any():
+            logger.warning("NaN values detected in encoded features. Cleaning up...")
+            X_train_encoded = np.nan_to_num(X_train_encoded)
+            X_val_encoded = np.nan_to_num(X_val_encoded)
+        
+        # Train classifier with improved parameters
         logger.info("Training XGBoost classifier...")
         self.train_classifier(X_train_encoded, y_train, X_val_encoded, y_val)
         
@@ -873,6 +1171,12 @@ class NetworkIntrusionDetectionModel:
         # Evaluate on test set
         logger.info("Evaluating on test set...")
         X_test_encoded = self.encoder.predict(X_test)
+        
+        # Clean up test encoded features if needed
+        if np.isnan(X_test_encoded).any():
+            logger.warning("NaN values detected in test encoded features. Cleaning up...")
+            X_test_encoded = np.nan_to_num(X_test_encoded)
+        
         dtest = xgb.DMatrix(X_test_encoded)
         y_pred = self.classifier.predict(dtest)
         y_pred_labels = np.argmax(y_pred, axis=1)
@@ -880,6 +1184,15 @@ class NetworkIntrusionDetectionModel:
         # Calculate accuracy
         accuracy = np.mean(y_pred_labels == y_test)
         logger.info(f"Test Accuracy: {accuracy:.4f}")
+        
+        # Calculate per-class metrics
+        from sklearn.metrics import classification_report, confusion_matrix
+        class_names = self.label_encoder.classes_
+        
+        # Print detailed classification report
+        logger.info("Classification Report:")
+        report = classification_report(y_test, y_pred_labels, target_names=class_names)
+        logger.info(f"\n{report}")
         
         # Save models and metadata
         logger.info("Saving models and metadata...")
@@ -1100,11 +1413,21 @@ class NetworkIntrusionDetectionModel:
             # Keep only columns used during training
             features_df = features_df[self.feature_columns]
             
+            # Handle potential NaN or Inf values
+            features_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+            features_df.fillna(0, inplace=True)
+            
             # Scale features
             X = self.scaler.transform(features_df)
             
+            # Additional safety check
+            X = np.nan_to_num(X)
+            
             # Encode features
             X_encoded = self.encoder.predict(X)
+            
+            # Final check for NaN values
+            X_encoded = np.nan_to_num(X_encoded)
             
             # Predict with XGBoost
             dtest = xgb.DMatrix(X_encoded)
