@@ -1,0 +1,16 @@
+tensorflow
+scikit-learn
+pandas
+numpy
+matplotlib
+xgboost
+lightgbm
+joblib
+tqdm
+flask
+werkzeug
+scapy
+scipy
+pyarrow
+openpyxl
+seaborn

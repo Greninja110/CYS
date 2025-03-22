@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Network Traffic Analyzer</title>
+    <title>Kitsune Network Traffic Analyzer</title>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.7.0/chart.min.js"></script>
     <style>
         .gradient-bg {
-            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            background: linear-gradient(135deg, #1a365d 0%, #2a4365 100%);
         }
         .file-upload {
             position: relative;
@@ -156,9 +156,9 @@
             <div class="container mx-auto py-4 px-6 flex justify-between items-center">
                 <div class="flex items-center">
                     <svg class="h-8 w-8 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                     </svg>
-                    <h1 class="text-2xl font-bold">Network Traffic Analyzer</h1>
+                    <h1 class="text-2xl font-bold">Kitsune Network Traffic Analyzer</h1>
                 </div>
                 <div>
                     <div id="modelStatus" class="text-sm">Checking model status...</div>
@@ -183,7 +183,7 @@
                     <!-- File Upload Card -->
                     <div class="col-span-2 bg-white rounded-lg shadow-md p-6">
                         <h2 class="text-xl font-semibold mb-4">Upload Pcap File</h2>
-                        <p class="text-gray-600 mb-6">Upload a network capture file (.pcap, .pcapng, or .cap) for analysis. Our AI model will analyze the traffic and identify potential threats.</p>
+                        <p class="text-gray-600 mb-6">Upload a network capture file (.pcap, .pcapng, or .cap) for analysis. Our AI model will analyze the traffic and identify potential threats using the Kitsune dataset.</p>
                         
                         <div class="border-dashed border-2 border-gray-300 rounded-lg p-8 text-center">
                             <div class="mb-4">
@@ -203,7 +203,7 @@
                         
                         <div class="mt-6">
                             <button id="analyzeBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition duration-300" disabled>
-                                <i class="fas fa-chart-network mr-2"></i> Analyze Traffic
+                                <i class="fas fa-shield-alt mr-2"></i> Analyze Traffic
                             </button>
                         </div>
                     </div>
@@ -222,19 +222,19 @@
                                 <div class="flex-shrink-0 h-6 w-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mr-3 mt-0.5">
                                     <span class="text-sm font-bold">2</span>
                                 </div>
-                                <p class="text-gray-600">Our AI model extracts relevant features from the traffic data.</p>
+                                <p class="text-gray-600">Our model extracts relevant features from the traffic data.</p>
                             </li>
                             <li class="flex items-start">
                                 <div class="flex-shrink-0 h-6 w-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mr-3 mt-0.5">
                                     <span class="text-sm font-bold">3</span>
                                 </div>
-                                <p class="text-gray-600">The model analyzes patterns to detect malicious activities.</p>
+                                <p class="text-gray-600">The hybrid architecture (autoencoder + classifier) analyzes patterns.</p>
                             </li>
                             <li class="flex items-start">
                                 <div class="flex-shrink-0 h-6 w-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mr-3 mt-0.5">
                                     <span class="text-sm font-bold">4</span>
                                 </div>
-                                <p class="text-gray-600">View detailed reports about normal traffic and detected attacks.</p>
+                                <p class="text-gray-600">View detailed reports on normal traffic and detected attacks.</p>
                             </li>
                         </ul>
                         
@@ -279,7 +279,7 @@
                                             <h3 id="trafficStatus" class="text-2xl font-bold mt-1">Normal</h3>
                                         </div>
                                         <div>
-                                            <svg class="h-12 w-12 opacity-80" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <svg id="statusIcon" class="h-12 w-12 opacity-80" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                                             </svg>
                                         </div>
@@ -386,57 +386,77 @@
             <!-- About Section -->
             <section id="about" class="page-section hidden">
                 <div class="bg-white rounded-lg shadow-md p-6">
-                    <h2 class="text-xl font-semibold mb-4">About Network Traffic Analyzer</h2>
+                    <h2 class="text-xl font-semibold mb-4">About Kitsune Network Traffic Analyzer</h2>
                     
                     <div class="prose max-w-none">
                         <p class="text-gray-600">
-                            The Network Traffic Analyzer is an advanced tool that uses artificial intelligence and machine learning to detect potential security threats in network traffic. Our system analyzes PCAP files to identify normal traffic patterns and various types of attacks.
+                            The Kitsune Network Traffic Analyzer is an advanced tool that uses artificial intelligence and machine learning to detect potential security threats in network traffic. Our system analyzes PCAP files to identify normal traffic patterns and various types of attacks using the Kitsune dataset.
                         </p>
                         
                         <h3 class="text-lg font-semibold mt-6 mb-2">How it Works</h3>
                         <p class="text-gray-600">
-                            Our system employs a hybrid approach using autoencoder and classification models trained on multiple cybersecurity datasets including CICIDS2017, NSL-KDD, and UNSW-NB15. This approach allows for effective identification of various attack types such as:
+                            Our system employs a hybrid approach combining an autoencoder for anomaly detection and a classification model for attack type identification. This approach allows for effective detection of various attack types in the Kitsune dataset including:
                         </p>
                         
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
                             <div class="bg-gray-50 p-4 rounded-lg">
-                                <h4 class="font-semibold text-gray-800">DoS/DDoS Attacks</h4>
-                                <p class="text-sm text-gray-600 mt-1">Attempts to make network resources unavailable by flooding them with traffic.</p>
+                                <h4 class="font-semibold text-gray-800">Active Wiretap</h4>
+                                <p class="text-sm text-gray-600 mt-1">Malicious interception of network traffic by actively tapping into the connection.</p>
                             </div>
                             <div class="bg-gray-50 p-4 rounded-lg">
-                                <h4 class="font-semibold text-gray-800">Probe/Scan Attacks</h4>
-                                <p class="text-sm text-gray-600 mt-1">Network scanning to gather information about potential vulnerabilities.</p>
+                                <h4 class="font-semibold text-gray-800">ARP MitM</h4>
+                                <p class="text-sm text-gray-600 mt-1">Address Resolution Protocol poisoning to perform Man-in-the-Middle attacks.</p>
                             </div>
                             <div class="bg-gray-50 p-4 rounded-lg">
-                                <h4 class="font-semibold text-gray-800">R2L Attacks</h4>
-                                <p class="text-sm text-gray-600 mt-1">Remote to Local attacks attempting to gain unauthorized access.</p>
+                                <h4 class="font-semibold text-gray-800">Fuzzing</h4>
+                                <p class="text-sm text-gray-600 mt-1">Protocol fuzzing attacks that send malformed packets to find vulnerabilities.</p>
                             </div>
                             <div class="bg-gray-50 p-4 rounded-lg">
-                                <h4 class="font-semibold text-gray-800">U2R Attacks</h4>
-                                <p class="text-sm text-gray-600 mt-1">User to Root attacks attempting to escalate privileges.</p>
+                                <h4 class="font-semibold text-gray-800">Mirai Botnet</h4>
+                                <p class="text-sm text-gray-600 mt-1">IoT botnet activity that targets and compromises vulnerable devices.</p>
+                            </div>
+                            <div class="bg-gray-50 p-4 rounded-lg">
+                                <h4 class="font-semibold text-gray-800">OS Scan</h4>
+                                <p class="text-sm text-gray-600 mt-1">Attempts to identify operating systems through network fingerprinting.</p>
+                            </div>
+                            <div class="bg-gray-50 p-4 rounded-lg">
+                                <h4 class="font-semibold text-gray-800">SSDP Flood</h4>
+                                <p class="text-sm text-gray-600 mt-1">Denial of service using Simple Service Discovery Protocol amplification.</p>
+                            </div>
+                            <div class="bg-gray-50 p-4 rounded-lg">
+                                <h4 class="font-semibold text-gray-800">SSL Renegotiation</h4>
+                                <p class="text-sm text-gray-600 mt-1">Exploiting SSL/TLS renegotiation to conduct resource exhaustion attacks.</p>
+                            </div>
+                            <div class="bg-gray-50 p-4 rounded-lg">
+                                <h4 class="font-semibold text-gray-800">SYN DoS</h4>
+                                <p class="text-sm text-gray-600 mt-1">SYN flood attacks that exhaust server resources by initiating connections.</p>
+                            </div>
+                            <div class="bg-gray-50 p-4 rounded-lg">
+                                <h4 class="font-semibold text-gray-800">Video Injection</h4>
+                                <p class="text-sm text-gray-600 mt-1">Attacks that inject unauthorized video content into legitimate streams.</p>
                             </div>
                         </div>
                         
                         <h3 class="text-lg font-semibold mt-6 mb-2">Dataset Information</h3>
                         <p class="text-gray-600">
-                            Our model is trained on three major network security datasets:
+                            The Kitsune dataset is a comprehensive collection of network traffic captures containing both normal traffic and nine different types of attacks. Each attack type is thoroughly labeled and provides a diverse range of attack scenarios.
                         </p>
                         
                         <ul class="list-disc pl-5 mt-2 space-y-2 text-gray-600">
-                            <li><strong>CICIDS2017</strong>: Contains benign and the most up-to-date common attacks which resemble real-world data.</li>
-                            <li><strong>NSL-KDD</strong>: A refined version of the KDD Cup 1999 dataset with duplicate records removed.</li>
-                            <li><strong>UNSW-NB15</strong>: A hybrid of real modern normal activities and synthetic contemporary attack behaviors.</li>
+                            <li><strong>Dataset size:</strong> Millions of network packets across different attack types.</li>
+                            <li><strong>Feature extraction:</strong> Our system extracts relevant features from network flows.</li>
+                            <li><strong>Balanced learning:</strong> Special techniques handle class imbalance between attack types.</li>
                         </ul>
                         
                         <h3 class="text-lg font-semibold mt-6 mb-2">Technical Specifications</h3>
                         <p class="text-gray-600">
-                            The Network Traffic Analyzer uses a combination of:
+                            The Kitsune Network Traffic Analyzer uses a combination of:
                         </p>
                         
                         <ul class="list-disc pl-5 mt-2 space-y-2 text-gray-600">
                             <li>Deep learning autoencoder for dimensionality reduction and anomaly detection</li>
-                            <li>XGBoost classifier for attack type categorization</li>
-                            <li>Feature engineering to extract relevant network traffic patterns</li>
+                            <li>Gradient boosting classifiers (XGBoost/LightGBM) for attack type categorization</li>
+                            <li>Time-window feature extraction to capture temporal patterns in network traffic</li>
                             <li>Flask web framework for the user interface</li>
                         </ul>
                     </div>
@@ -447,7 +467,7 @@
         <!-- Footer -->
         <footer class="bg-gray-800 text-white py-4">
             <div class="container mx-auto px-6 text-center">
-                <p>Network Traffic Analyzer &copy; 2025 | Powered by AI</p>
+                <p>Kitsune Network Traffic Analyzer &copy; 2025 | Powered by AI</p>
             </div>
         </footer>
     </div>
@@ -477,22 +497,23 @@
             const flowsAnalyzed = document.getElementById('flowsAnalyzed');
             const normalPercentage = document.getElementById('normalPercentage');
             const attackTypesTable = document.getElementById('attackTypesTable');
+            const statusIcon = document.getElementById('statusIcon');
             
             // Current task being analyzed
             let currentTaskId = null;
             let statusCheckInterval = null;
             let trafficChart = null;
             let attackColors = {
-                'normal': 'rgba(72, 187, 120, 0.7)',
-                'dos': 'rgba(237, 100, 100, 0.7)',
-                'ddos': 'rgba(246, 173, 85, 0.7)',
-                'probe': 'rgba(90, 103, 216, 0.7)',
-                'r2l': 'rgba(153, 102, 255, 0.7)',
-                'u2r': 'rgba(255, 159, 64, 0.7)',
-                'backdoor': 'rgba(201, 91, 186, 0.7)',
-                'injection': 'rgba(75, 192, 192, 0.7)',
-                'mitm': 'rgba(255, 206, 86, 0.7)',
-                'theft': 'rgba(54, 162, 235, 0.7)'
+                'Normal': 'rgba(72, 187, 120, 0.7)',
+                'Active_Wiretap': 'rgba(237, 100, 100, 0.7)',
+                'ARP_MitM': 'rgba(246, 173, 85, 0.7)',
+                'Fuzzing': 'rgba(90, 103, 216, 0.7)',
+                'Mirai_Botnet': 'rgba(153, 102, 255, 0.7)',
+                'OS_Scan': 'rgba(255, 159, 64, 0.7)',
+                'SSDP_Flood': 'rgba(201, 91, 186, 0.7)',
+                'SSL_Renegotiation': 'rgba(75, 192, 192, 0.7)',
+                'SYN_DoS': 'rgba(255, 206, 86, 0.7)',
+                'Video_Injection': 'rgba(54, 162, 235, 0.7)'
             };
             
             // Check model status
@@ -676,14 +697,21 @@
                 flowsAnalyzed.textContent = result.flows_analyzed.toLocaleString();
                 normalPercentage.textContent = result.normal_percentage.toFixed(1) + '%';
                 
-                // Update status card color based on result
+                // Update status card color and icon based on result
                 const statusCard = trafficStatus.closest('.bg-gradient-to-r');
-                if (result.status.toLowerCase().includes('normal')) {
+                
+                if (result.status.toLowerCase().includes('normal') && !result.status.toLowerCase().includes('attack')) {
                     statusCard.className = 'flex-1 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg p-6';
+                    // Use checkmark icon for normal traffic
+                    statusIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />';
                 } else if (result.status.toLowerCase().includes('mostly')) {
                     statusCard.className = 'flex-1 bg-gradient-to-r from-yellow-500 to-yellow-600 text-white rounded-lg p-6';
+                    // Use warning icon for mostly normal
+                    statusIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />';
                 } else {
                     statusCard.className = 'flex-1 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-lg p-6';
+                    // Use alert icon for attacks
+                    statusIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />';
                 }
                 
                 // Clear attack types table
@@ -695,6 +723,9 @@
                 const chartColors = [];
                 
                 result.attack_types.forEach(attack => {
+                    // Clean up type name for display (replace underscores with spaces)
+                    const displayType = attack.type.replace(/_/g, ' ');
+                    
                     // Add to table
                     const row = document.createElement('tr');
                     
@@ -711,7 +742,7 @@
                     colorDot.className = 'w-3 h-3 rounded-full mr-2';
                     colorDot.style.backgroundColor = color;
                     
-                    const typeText = document.createTextNode(attack.type);
+                    const typeText = document.createTextNode(displayType);
                     
                     typeLabel.appendChild(colorDot);
                     typeLabel.appendChild(typeText);
@@ -774,7 +805,7 @@
                     attackTypesTable.appendChild(row);
                     
                     // Add to chart data
-                    chartLabels.push(attack.type);
+                    chartLabels.push(displayType);
                     chartData.push(attack.percentage);
                     chartColors.push(color);
                 });
@@ -886,6 +917,20 @@
                             
                             actionsCell.appendChild(viewBtn);
                             
+                            // Add info button for failed tasks
+                            if (task.status === 'failed') {
+                                const infoBtn = document.createElement('button');
+                                infoBtn.className = 'text-yellow-600 hover:text-yellow-800';
+                                infoBtn.innerHTML = '<i class="fas fa-info-circle"></i>';
+                                infoBtn.title = 'Error Details';
+                                
+                                infoBtn.addEventListener('click', function() {
+                                    loadErrorInfo(task.id);
+                                });
+                                
+                                actionsCell.appendChild(infoBtn);
+                            }
+                            
                             // Add cells to row
                             row.appendChild(fileCell);
                             row.appendChild(dateCell);
@@ -898,6 +943,33 @@
                     })
                     .catch(error => {
                         console.error('Error:', error);
+                    });
+            }
+            
+            function loadErrorInfo(taskId) {
+                fetch(`/error_info/${taskId}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.error) {
+                            alert(data.error);
+                            return;
+                        }
+                        
+                        // Display error information
+                        let message = `Error: ${data.error_message}\n\n`;
+                        message += `File: ${data.file_name}\n`;
+                        message += `Time: ${data.created_at}\n\n`;
+                        message += "Suggestions:\n";
+                        
+                        data.suggestions.forEach(suggestion => {
+                            message += `- ${suggestion}\n`;
+                        });
+                        
+                        alert(message);
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                        alert('An error occurred while loading error information.');
                     });
             }
             

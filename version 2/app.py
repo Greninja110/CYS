@@ -8,7 +8,7 @@ import threading
 import logging
 
 # Import our model
-from train import NetworkIntrusionDetectionModel
+from train import KitsuneNIDSModel
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,7 +34,7 @@ def analyze_pcap(file_path, task_id):
     """Analyze pcap file using the trained model"""
     try:
         # Load the model
-        model = NetworkIntrusionDetectionModel(model_path="./models")
+        model = KitsuneNIDSModel(model_path="./models")
         
         # Update task status
         analysis_tasks[task_id]['status'] = 'processing'
@@ -42,6 +42,15 @@ def analyze_pcap(file_path, task_id):
         
         # Perform prediction
         result = model.predict(file_path)
+        
+        # Check if prediction failed
+        if 'error' in result:
+            # Update task status with error
+            analysis_tasks[task_id]['status'] = 'failed'
+            analysis_tasks[task_id]['progress'] = 100
+            analysis_tasks[task_id]['error'] = result['error']
+            logger.error(f"Analysis failed for task {task_id}: {result['error']}")
+            return
         
         # Update task status with results
         analysis_tasks[task_id]['status'] = 'completed'
@@ -191,7 +200,7 @@ def check_model():
     required_files = [
         'autoencoder_model.h5',
         'encoder_model.h5',
-        'xgboost_classifier.model',
+        'xgboost_classifier.model',  # Or lightgbm_classifier.txt
         'scaler.pkl',
         'label_encoder.pkl',
         'feature_columns.pkl',
@@ -200,6 +209,10 @@ def check_model():
     
     missing_files = []
     for file in required_files:
+        # Check for XGBoost or LightGBM classifier
+        if file == 'xgboost_classifier.model' and os.path.exists(os.path.join(model_path, 'lightgbm_classifier.txt')):
+            continue
+        
         if not os.path.exists(os.path.join(model_path, file)):
             missing_files.append(file)
     
@@ -214,6 +227,69 @@ def check_model():
         'status': 'ready',
         'message': 'Model is ready for analysis.'
     })
+
+@app.route('/kitsune_info', methods=['GET'])
+def kitsune_info():
+    """Get information about the Kitsune dataset and model"""
+    model = KitsuneNIDSModel(model_path="./models")
+    
+    # Try to load the model to get attack types
+    try:
+        model.load_models()
+        attack_types = [
+            {"name": attack_type, "description": model.attack_mapping.get(attack_type, attack_type)}
+            for attack_type in model.label_encoder.classes_
+        ]
+    except:
+        # Use default attack types if model not loaded
+        attack_types = [
+            {"name": "Normal", "description": "Normal Network Traffic"},
+            {"name": "Active_Wiretap", "description": "Active Wiretap Attack"},
+            {"name": "ARP_MitM", "description": "ARP Man-in-the-Middle Attack"},
+            {"name": "Fuzzing", "description": "Protocol Fuzzing Attack"},
+            {"name": "Mirai_Botnet", "description": "Mirai Botnet Activity"},
+            {"name": "OS_Scan", "description": "Operating System Scanning"},
+            {"name": "SSDP_Flood", "description": "SSDP Flooding Attack"},
+            {"name": "SSL_Renegotiation", "description": "SSL Renegotiation Attack"},
+            {"name": "SYN_DoS", "description": "SYN Denial of Service"},
+            {"name": "Video_Injection", "description": "Video Injection Attack"}
+        ]
+    
+    return jsonify({
+        'dataset_name': 'Kitsune',
+        'attack_types': attack_types,
+        'model_type': 'Hybrid Autoencoder + XGBoost/LightGBM',
+        'description': 'The Kitsune Network Intrusion Detection System analyzes network traffic to detect 9 different types of attacks and anomalies.'
+    })
+
+@app.route('/error_info/<task_id>', methods=['GET'])
+def error_info(task_id):
+    """Get detailed error information for a failed task"""
+    if task_id not in analysis_tasks:
+        return jsonify({'error': 'Task not found'}), 404
+    
+    task = analysis_tasks[task_id]
+    
+    if task['status'] != 'failed':
+        return jsonify({'error': 'This task did not fail', 'status': task['status']}), 400
+    
+    error_message = task.get('error', 'Unknown error')
+    
+    # Get additional information about the failure
+    error_info = {
+        'error_message': error_message,
+        'file_name': task['filename'],
+        'file_path': task['file_path'],
+        'created_at': task['created_at'],
+        'suggestions': [
+            'Check if the pcap file is valid and not corrupted',
+            'Verify that the file contains network traffic data',
+            'Ensure the model is properly trained and all required files are present',
+            'Try with a different pcap file to see if the issue persists'
+        ]
+    }
+    
+    return jsonify(error_info)
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
