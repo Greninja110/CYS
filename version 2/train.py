@@ -142,6 +142,7 @@ class KitsuneNIDSModel:
             'Active_Wiretap': 'Active Wiretap Attack',
             'ARP_MitM': 'ARP Man-in-the-Middle Attack',
             'Fuzzing': 'Protocol Fuzzing Attack',
+            'fuzzing': 'Protocol Fuzzing Attack',
             'Mirai_Botnet': 'Mirai Botnet Activity',
             'OS_Scan': 'Operating System Scanning',
             'SSDP_Flood': 'SSDP Flooding Attack',
@@ -152,6 +153,7 @@ class KitsuneNIDSModel:
         
         # Feature columns (will be set during data loading)
         self.feature_columns = None
+        self.all_features = set()  # Store all possible feature columns for consistent preprocessing
         
         # Track version for model saving
         self.version = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -252,6 +254,9 @@ class KitsuneNIDSModel:
                         chunk_count += 1
                         logger.info(f"Processing chunk {chunk_count}/{total_chunks} for {attack_type}")
                         
+                        # Collect all feature names (important for ensuring consistent features)
+                        self.all_features.update(chunk.columns)
+                        
                         # Add attack type label to the chunk
                         chunk['Label'] = attack_type
                         
@@ -276,6 +281,10 @@ class KitsuneNIDSModel:
                 else:
                     # For smaller files, load at once
                     chunk = pd.read_csv(dataset_file)
+                    
+                    # Collect all feature names
+                    self.all_features.update(chunk.columns)
+                    
                     chunk['Label'] = attack_type
                     
                     # Apply limit if specified
@@ -298,6 +307,12 @@ class KitsuneNIDSModel:
             logger.error("No dataset chunks were loaded")
             return None
             
+        # Remove 'Label' from all_features if it's there
+        if 'Label' in self.all_features:
+            self.all_features.remove('Label')
+            
+        logger.info(f"Collected {len(self.all_features)} unique features from all datasets")
+        
         # Combine all chunks
         logger.info(f"Combining {len(combined_data_chunks)} data chunks...")
         try:
@@ -314,12 +329,14 @@ class KitsuneNIDSModel:
             logger.error(f"Error combining data chunks: {e}")
             return None
     
-    def preprocess_data(self, combined_data):
+    def preprocess_data(self, combined_data, for_encoder=False):
         """
         Preprocess the dataset for training
         
         Args:
             combined_data: Combined dataset from load_kitsune_dataset
+            for_encoder: Whether this preprocessing is for training the encoder
+                        If True, it will save the feature list as a reference
             
         Returns:
             X: Features for training
@@ -338,6 +355,22 @@ class KitsuneNIDSModel:
         try:
             # Make a copy to avoid modifying the original
             data = combined_data.copy()
+            
+            # Ensure all features are present
+            if for_encoder:
+                # If this is for the encoder, we're setting up the reference feature set
+                # Add any missing feature columns from what we've collected across all datasets
+                for feature in self.all_features:
+                    if feature not in data.columns and feature != 'Label':
+                        data[feature] = 0
+                        logger.info(f"Added missing feature column: {feature}")
+            else:
+                # If the feature columns reference exists, align with it
+                if self.feature_columns is not None:
+                    for feature in self.feature_columns:
+                        if feature not in data.columns:
+                            data[feature] = 0
+                            logger.info(f"Added missing feature column: {feature}")
             
             # Handle categorical columns
             categorical_cols = data.select_dtypes(include=['object']).columns.tolist()
@@ -373,20 +406,64 @@ class KitsuneNIDSModel:
                 logger.error("Label column not found in dataset")
                 return None, None, None
             
-            # Store feature names
-            self.feature_columns = X.columns.tolist()
+            # If this is for the encoder, store the feature columns for reference
+            if for_encoder:
+                self.feature_columns = X.columns.tolist()
+                logger.info(f"Stored {len(self.feature_columns)} feature columns for reference")
+            elif self.feature_columns is not None:
+                # Ensure features match exactly what the encoder expects
+                current_features = set(X.columns)
+                reference_features = set(self.feature_columns)
+                
+                # Add missing columns
+                missing_features = reference_features - current_features
+                for feature in missing_features:
+                    X[feature] = 0
+                
+                # Remove extra columns
+                extra_features = current_features - reference_features
+                if extra_features:
+                    X = X.drop(columns=list(extra_features))
+                
+                # Ensure columns are in the same order as the reference
+                X = X[self.feature_columns]
+                
+                if missing_features or extra_features:
+                    logger.info(f"Aligned features with encoder reference: added {len(missing_features)}, removed {len(extra_features)}")
             
             # Scale features
-            X_scaled = self.scaler.fit_transform(X)
+            if for_encoder:
+                # Fit the scaler for the first time
+                X_scaled = self.scaler.fit_transform(X)
+            else:
+                # Use the already fitted scaler
+                try:
+                    X_scaled = self.scaler.transform(X)
+                except Exception as e:
+                    logger.error(f"Error transforming features with scaler: {e}")
+                    # Temporary fallback: fit and transform
+                    logger.warning("Using fit_transform as a fallback")
+                    X_scaled = self.scaler.fit_transform(X)
             
             # Convert to float32 to reduce memory usage by 50%
             X_scaled = X_scaled.astype(np.float32)
             
             # Encode labels
-            y_encoded = self.label_encoder.fit_transform(y)
-            
-            # Save label classes for reference
-            self.label_classes = self.label_encoder.classes_
+            if for_encoder:
+                # Fit label encoder for the first time
+                y_encoded = self.label_encoder.fit_transform(y)
+                # Save label classes for reference
+                self.label_classes = self.label_encoder.classes_
+            else:
+                # Use already fitted label encoder
+                try:
+                    y_encoded = self.label_encoder.transform(y)
+                except Exception as e:
+                    logger.warning(f"Error transforming labels: {e}")
+                    # Handle any new labels not seen during training
+                    # For now, just re-fit the encoder
+                    logger.warning("Re-fitting label encoder to handle new labels")
+                    y_encoded = self.label_encoder.fit_transform(y)
             
             # Log processing time
             processing_time = time.time() - start_time
@@ -400,7 +477,7 @@ class KitsuneNIDSModel:
                 percentage = (count / len(y_encoded)) * 100
                 logger.info(f"  {class_name}: {count} samples ({percentage:.2f}%)")
             
-            return X_scaled, y_encoded, self.feature_columns
+            return X_scaled, y_encoded, X.columns.tolist()
             
         except Exception as e:
             logger.error(f"Error during data preprocessing: {e}")
@@ -433,7 +510,7 @@ class KitsuneNIDSModel:
             initializer = HeNormal(seed=42)
             
             # Input layer
-            input_layer = Input(shape=(input_dim,))
+            input_layer = Input(shape=(input_dim,), name="input_layer")
             
             # Encoder
             x = BatchNormalization()(input_layer)
@@ -446,7 +523,7 @@ class KitsuneNIDSModel:
             x = Dropout(0.2)(x)
             
             # Bottleneck layer
-            encoded = Dense(self.latent_dim, activation='relu', kernel_initializer=initializer)(x)
+            encoded = Dense(self.latent_dim, activation='relu', kernel_initializer=initializer, name="bottleneck")(x)
             
             # Decoder
             x = Dense(128, activation='relu', kernel_initializer=initializer)(encoded)
@@ -704,12 +781,12 @@ class KitsuneNIDSModel:
             logger.error(f"Error training classifier: {e}")
             return None
     
-    def train_model_batch(self, batch_size=500000, use_xgboost=True):
+    def train_model_batch(self, batch_size=13500000, use_xgboost=True):
         """
         Train the model using batch processing to handle large datasets
         
         Args:
-            batch_size: Size of batches to process at once
+            batch_size: Size of batches to process at once (default is large enough for 1.5M per attack type)
             use_xgboost: Whether to use XGBoost (True) or LightGBM (False)
             
         Returns:
@@ -743,8 +820,9 @@ class KitsuneNIDSModel:
         logger.info("Step 2: Loading initial subset for autoencoder training...")
         
         # Calculate samples per attack for initial subset
-        samples_per_attack = batch_size // len(attack_dirs)
-        logger.info(f"Using {samples_per_attack} samples per attack type for initial training")
+        # We'll use a smaller subset for the autoencoder training to save memory
+        samples_per_attack = min(100000, batch_size // len(attack_dirs))
+        logger.info(f"Using {samples_per_attack} samples per attack type for initial autoencoder training")
         
         initial_data = []
         for attack_type in attack_dirs:
@@ -778,7 +856,8 @@ class KitsuneNIDSModel:
         
         # Step 3: Preprocess initial subset and build autoencoder
         logger.info("Step 3: Preprocessing initial subset...")
-        X_initial, y_initial, feature_names = self.preprocess_data(subset_data)
+        # Note the for_encoder=True flag to establish the reference feature set
+        X_initial, y_initial, feature_names = self.preprocess_data(subset_data, for_encoder=True)
         
         if X_initial is None or y_initial is None:
             logger.error("Initial data preprocessing failed")
@@ -833,8 +912,9 @@ class KitsuneNIDSModel:
         encoded_labels = []
         
         # Calculate samples per attack type for classifier training
-        samples_per_attack_for_classifier = min(batch_size // len(attack_dirs), 200000)
-        logger.info(f"Using up to {samples_per_attack_for_classifier} samples per attack type for classifier")
+        # Set target to 1.5 million samples per attack type (or all available samples)
+        samples_per_attack_for_classifier = 1500000
+        logger.info(f"Using up to {samples_per_attack_for_classifier} samples per attack type for classifier training")
         
         for attack_type in attack_dirs:
             logger.info(f"Processing attack type: {attack_type} for classifier training")
@@ -848,10 +928,13 @@ class KitsuneNIDSModel:
             if attack_data is None or attack_data.empty:
                 logger.warning(f"No data loaded for {attack_type}, skipping...")
                 continue
+            
+            # Log actual sample count obtained
+            logger.info(f"Loaded {len(attack_data)} samples for {attack_type}")
                 
-            # Preprocess this batch
+            # Preprocess this batch - Note the for_encoder=False to use existing feature list
             logger.info(f"Preprocessing {attack_type} batch...")
-            X_attack, y_attack, _ = self.preprocess_data(attack_data)
+            X_attack, y_attack, _ = self.preprocess_data(attack_data, for_encoder=False)
             
             if X_attack is None or y_attack is None:
                 logger.warning(f"Preprocessing failed for {attack_type}, skipping...")
@@ -863,12 +946,24 @@ class KitsuneNIDSModel:
             
             # Encode features
             logger.info(f"Encoding {attack_type} features...")
-            X_encoded = self.encoder.predict(X_attack)
-            
-            # Add to collection
-            encoded_features.append(X_encoded)
-            encoded_labels.append(y_attack)
-            logger.info(f"Added {len(y_attack)} samples of {attack_type} to classifier dataset")
+            try:
+                # Log the shape to debug any issues
+                logger.info(f"Input shape before encoding: {X_attack.shape}")
+                # Make sure it matches what the encoder expects
+                if X_attack.shape[1] != len(self.feature_columns):
+                    logger.error(f"Shape mismatch: encoder expects {len(self.feature_columns)} features, got {X_attack.shape[1]}")
+                    continue
+                    
+                X_encoded = self.encoder.predict(X_attack)
+                logger.info(f"Encoded features shape: {X_encoded.shape}")
+                
+                # Add to collection
+                encoded_features.append(X_encoded)
+                encoded_labels.append(y_attack)
+                logger.info(f"Added {len(y_attack)} samples of {attack_type} to classifier dataset")
+            except Exception as e:
+                logger.error(f"Error encoding features for {attack_type}: {e}")
+                continue
             
             # Free memory
             del X_attack, y_attack
@@ -1024,7 +1119,7 @@ class KitsuneNIDSModel:
         else:
             # Otherwise, use the memory-optimized batch approach
             logger.info("Training with batch processing (memory-optimized)")
-            return self.train_model_batch(batch_size=500000, use_xgboost=use_xgboost)
+            return self.train_model_batch(batch_size=13500000, use_xgboost=use_xgboost)
     
     def _train_model_original(self, limit_samples=None, use_xgboost=True):
         """
@@ -1057,7 +1152,8 @@ class KitsuneNIDSModel:
         
         # 2. Preprocess data
         logger.info("Step 2: Preprocessing data...")
-        X, y, feature_names = self.preprocess_data(combined_data)
+        # Note the for_encoder=True flag to establish the reference feature set
+        X, y, feature_names = self.preprocess_data(combined_data, for_encoder=True)
         
         if X is None or y is None:
             logger.error("Data preprocessing failed")
@@ -1520,17 +1616,22 @@ class KitsuneNIDSModel:
         
         try:
             # Align features with trained model
+            logger.info(f"Aligning features with model (expected {len(self.feature_columns)} features)")
+            
+            # Add missing features
             missing_features = set(self.feature_columns) - set(features_df.columns)
             for feature in missing_features:
                 features_df[feature] = 0
-            
-            # Keep only features used in training
+                
+            # Remove extra features
             extra_features = set(features_df.columns) - set(self.feature_columns)
             if extra_features:
                 features_df = features_df.drop(columns=list(extra_features))
             
             # Ensure features are in same order as training
             features_df = features_df[self.feature_columns]
+            
+            logger.info(f"Feature alignment complete: {features_df.shape}")
             
             # Handle NaN values
             features_df.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -1644,8 +1745,8 @@ def main():
                        help='Use LightGBM instead of XGBoost (more memory efficient)')
     parser.add_argument('--chunk-size', type=int, default=100000,
                        help='Number of samples to process at once')
-    parser.add_argument('--batch-size', type=int, default=500000,
-                       help='Batch size for memory-efficient training')
+    parser.add_argument('--batch-size', type=int, default=13500000,
+                       help='Batch size for memory-efficient training (default 1.5M × 9 types)')
     
     args = parser.parse_args()
     
