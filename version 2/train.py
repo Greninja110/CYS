@@ -1455,6 +1455,9 @@ class KitsuneNIDSModel:
         
         try:
             from scapy.all import rdpcap
+            import numpy as np
+            import pandas as pd
+            from decimal import Decimal
             
             # Verify file exists
             if not os.path.exists(pcap_file):
@@ -1472,29 +1475,29 @@ class KitsuneNIDSModel:
             # Extract features
             features = []
             
-            # Group packets by flow
+            # Group packets by flow - ensuring all components are native Python types
             flows = {}
             for i, pkt in enumerate(packets):
                 try:
                     if 'IP' in pkt:
-                        # Extract flow key
-                        src_ip = pkt['IP'].src
-                        dst_ip = pkt['IP'].dst
-                        proto = pkt['IP'].proto
+                        # Extract flow key (ensuring all values are native Python types, not numpy types)
+                        src_ip = str(pkt['IP'].src)
+                        dst_ip = str(pkt['IP'].dst)
+                        proto = int(pkt['IP'].proto) if isinstance(pkt['IP'].proto, np.integer) else pkt['IP'].proto
                         
-                        # Extract ports if available
+                        # Extract ports if available (ensuring they're native Python ints)
                         src_port = 0
                         dst_port = 0
                         
                         if 'TCP' in pkt:
-                            src_port = pkt['TCP'].sport
-                            dst_port = pkt['TCP'].dport
+                            src_port = int(pkt['TCP'].sport) if isinstance(pkt['TCP'].sport, np.integer) else pkt['TCP'].sport
+                            dst_port = int(pkt['TCP'].dport) if isinstance(pkt['TCP'].dport, np.integer) else pkt['TCP'].dport
                         elif 'UDP' in pkt:
-                            src_port = pkt['UDP'].sport
-                            dst_port = pkt['UDP'].dport
+                            src_port = int(pkt['UDP'].sport) if isinstance(pkt['UDP'].sport, np.integer) else pkt['UDP'].sport
+                            dst_port = int(pkt['UDP'].dport) if isinstance(pkt['UDP'].dport, np.integer) else pkt['UDP'].dport
                         
-                        # Create flow key
-                        flow_key = (src_ip, dst_ip, src_port, dst_port, proto)
+                        # Create flow key as a string to avoid any type issues with tuples
+                        flow_key = f"{src_ip}:{dst_ip}:{src_port}:{dst_port}:{proto}"
                         
                         # Add packet to flow
                         if flow_key not in flows:
@@ -1507,27 +1510,64 @@ class KitsuneNIDSModel:
             logger.info(f"Identified {len(flows)} flows in the pcap file")
             
             # Process each flow to extract features
-            for flow_id, flow_packets in flows.items():
+            for flow_key, flow_packets in flows.items():
                 try:
-                    # Basic flow info
-                    src_ip, dst_ip, src_port, dst_port, proto = flow_id
+                    # Parse the flow key back into components
+                    src_ip, dst_ip, src_port, dst_port, proto = flow_key.split(':')
+                    src_port = int(src_port)
+                    dst_port = int(dst_port)
+                    proto = int(proto)
                     
                     # Basic stats
                     pkt_count = len(flow_packets)
-                    flow_duration = flow_packets[-1].time - flow_packets[0].time if pkt_count > 1 else 0
-                    total_size = sum(len(p) for p in flow_packets)
-                    avg_pkt_size = total_size / pkt_count if pkt_count > 0 else 0
+                    
+                    # Safely convert time values to native Python floats
+                    packet_times = []
+                    for p in flow_packets:
+                        if hasattr(p, 'time'):
+                            # Convert numpy.float64 to native Python float
+                            if isinstance(p.time, np.floating):
+                                packet_times.append(float(p.time))
+                            else:
+                                packet_times.append(p.time)
+                    
+                    if len(packet_times) > 1:
+                        flow_duration = packet_times[-1] - packet_times[0]
+                    else:
+                        flow_duration = 0.0
+                    
+                    # Safe conversion for total size
+                    total_size = 0
+                    for p in flow_packets:
+                        if hasattr(p, 'len'):
+                            # Convert numpy.int to native Python int if necessary
+                            if isinstance(p.len, np.integer):
+                                total_size += int(p.len)
+                            else:
+                                total_size += p.len
+                        else:
+                            total_size += len(p)
+                    
+                    # More stats with safe conversions
+                    avg_pkt_size = float(total_size) / pkt_count if pkt_count > 0 else 0.0
                     
                     # Inter-arrival time stats
-                    if pkt_count > 1:
-                        times = [p.time for p in flow_packets]
-                        iats = [times[i+1] - times[i] for i in range(len(times)-1)]
-                        mean_iat = np.mean(iats)
-                        std_iat = np.std(iats)
-                        min_iat = np.min(iats)
-                        max_iat = np.max(iats)
+                    if len(packet_times) > 1:
+                        iats = [packet_times[i+1] - packet_times[i] for i in range(len(packet_times)-1)]
+                        # Use Python's built-in functions instead of numpy for safety
+                        mean_iat = sum(iats) / len(iats) if iats else 0.0
+                        
+                        # Manual variance and std_dev calculation to avoid numpy
+                        if len(iats) > 1:
+                            variance = sum((x - mean_iat) ** 2 for x in iats) / len(iats)
+                            std_iat = variance ** 0.5  # sqrt
+                        else:
+                            std_iat = 0.0
+                        
+                        min_iat = min(iats) if iats else 0.0
+                        max_iat = max(iats) if iats else 0.0
                     else:
-                        mean_iat = std_iat = min_iat = max_iat = 0
+                        mean_iat = std_iat = min_iat = max_iat = 0.0
                     
                     # TCP flags if applicable
                     syn_count = fin_count = rst_count = psh_count = ack_count = urg_count = 0
@@ -1535,7 +1575,8 @@ class KitsuneNIDSModel:
                     if proto == 6:  # TCP
                         for p in flow_packets:
                             if 'TCP' in p:
-                                flags = p['TCP'].flags
+                                # Convert numpy.int to native Python int if necessary
+                                flags = int(p['TCP'].flags) if isinstance(p['TCP'].flags, np.integer) else p['TCP'].flags
                                 if flags & 0x02: syn_count += 1
                                 if flags & 0x01: fin_count += 1
                                 if flags & 0x04: rst_count += 1
@@ -1543,31 +1584,31 @@ class KitsuneNIDSModel:
                                 if flags & 0x10: ack_count += 1
                                 if flags & 0x20: urg_count += 1
                     
-                    # Create feature dictionary
+                    # Create feature dictionary with native Python types
                     flow_features = {
-                        'proto': proto,
-                        'pkt_count': pkt_count,
-                        'flow_duration': flow_duration,
-                        'total_size': total_size,
-                        'avg_pkt_size': avg_pkt_size,
-                        'mean_iat': mean_iat,
-                        'std_iat': std_iat,
-                        'min_iat': min_iat,
-                        'max_iat': max_iat,
-                        'src_port': src_port,
-                        'dst_port': dst_port,
-                        'syn_count': syn_count,
-                        'fin_count': fin_count,
-                        'rst_count': rst_count,
-                        'psh_count': psh_count,
-                        'ack_count': ack_count,
-                        'urg_count': urg_count
+                        'proto': int(proto),
+                        'pkt_count': int(pkt_count),
+                        'flow_duration': float(flow_duration),
+                        'total_size': int(total_size),
+                        'avg_pkt_size': float(avg_pkt_size),
+                        'mean_iat': float(mean_iat),
+                        'std_iat': float(std_iat),
+                        'min_iat': float(min_iat),
+                        'max_iat': float(max_iat),
+                        'src_port': int(src_port),
+                        'dst_port': int(dst_port),
+                        'syn_count': int(syn_count),
+                        'fin_count': int(fin_count),
+                        'rst_count': int(rst_count),
+                        'psh_count': int(psh_count),
+                        'ack_count': int(ack_count),
+                        'urg_count': int(urg_count)
                     }
                     
                     features.append(flow_features)
                     
                 except Exception as e:
-                    logger.warning(f"Error extracting features for flow {flow_id}: {e}")
+                    logger.warning(f"Error extracting features for flow {flow_key}: {e}")
             
             # Create DataFrame
             if not features:
@@ -1581,11 +1622,13 @@ class KitsuneNIDSModel:
             
         except Exception as e:
             logger.error(f"Error extracting features from pcap: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
             
     def predict(self, pcap_file):
         """
-        Predict attack types from a pcap file
+        Predict attack types from a pcap file with improved confidence handling
         
         Args:
             pcap_file: Path to pcap file
@@ -1646,39 +1689,115 @@ class KitsuneNIDSModel:
             # Encode with autoencoder
             X_encoded = self.encoder.predict(X_scaled)
             
-            # Predict with classifier
+            # Predict with classifier - with detailed logging
             if isinstance(self.classifier, xgb.Booster):
                 dmatrix = xgb.DMatrix(X_encoded)
+                # Log model info for debugging
+                logger.info(f"XGBoost model type: {type(self.classifier).__name__}")
+                logger.info(f"Number of trees: {self.classifier.num_boosted_rounds()}")
+                # Get prediction probabilities
                 y_pred_proba = self.classifier.predict(dmatrix)
+                # Log the shape and a sample of predictions
+                logger.info(f"Prediction shape: {y_pred_proba.shape}")
+                logger.info(f"Sample prediction (first 5 rows, first 5 classes):\n{y_pred_proba[:5, :5]}")
+                
+                # Check for unusual probability distribution
+                max_probs = np.max(y_pred_proba, axis=1)
+                min_probs = np.min(y_pred_proba, axis=1)
+                avg_max_prob = np.mean(max_probs)
+                std_max_prob = np.std(max_probs)
+                logger.info(f"Probability stats - Avg max: {avg_max_prob:.4f}, Std max: {std_max_prob:.4f}, Min: {np.min(min_probs):.4f}, Max: {np.max(max_probs):.4f}")
+                
             else:  # LightGBM
+                # Get prediction probabilities
                 y_pred_proba = self.classifier.predict(X_encoded)
+                # Log the shape and a sample of predictions
+                logger.info(f"Prediction shape: {y_pred_proba.shape if hasattr(y_pred_proba, 'shape') else 'unknown'}")
+                if hasattr(y_pred_proba, 'shape'):
+                    logger.info(f"Sample prediction (first 5 rows, first 5 classes):\n{y_pred_proba[:5, :5]}")
+                else:
+                    logger.info(f"Sample prediction format: {type(y_pred_proba)}")
             
             # Get predicted classes
             y_pred = np.argmax(y_pred_proba, axis=1)
             
+            # Debug info for first 10 predictions
+            for i in range(min(10, len(y_pred))):
+                class_idx = y_pred[i]
+                class_name = self.label_encoder.inverse_transform([class_idx])[0]
+                class_prob = y_pred_proba[i, class_idx]
+                logger.info(f"Sample {i}: Class {class_idx} ({class_name}) with prob {class_prob:.4f} ({class_prob*100:.2f}%)")
+            
+            # Calculate confidences properly for each prediction
+            confidences = []
+            for i, pred_idx in enumerate(y_pred):
+                # Get the probability for the predicted class
+                if isinstance(y_pred_proba[i], np.ndarray):
+                    conf = float(y_pred_proba[i][pred_idx]) * 100  # Convert to percentage
+                else:
+                    # If y_pred_proba is not a 2D array, adjust accordingly
+                    conf = float(y_pred_proba[i]) * 100 if isinstance(y_pred_proba[i], (np.number, float)) else 59.0
+                confidences.append(conf)
+                
+            # Debug confidence statistics
+            if confidences:
+                logger.info(f"Confidence stats - Avg: {np.mean(confidences):.2f}%, Min: {np.min(confidences):.2f}%, Max: {np.max(confidences):.2f}%, Std: {np.std(confidences):.2f}%")
+                
             # Convert to original labels
             predicted_labels = self.label_encoder.inverse_transform(y_pred)
             
-            # Count by attack type
+            # Count by attack type with actual confidence values
             attack_counts = {}
-            for label, proba in zip(predicted_labels, y_pred_proba):
-                confidence = proba[y_pred[0]] * 100  # Get confidence for predicted class
-                
+            for label, confidence in zip(predicted_labels, confidences):
                 if label not in attack_counts:
                     attack_counts[label] = {
                         'count': 0,
-                        'confidence_sum': 0
+                        'confidence_sum': 0,
+                        'all_confidences': []  # Store all confidences for debugging
                     }
                 
                 attack_counts[label]['count'] += 1
                 attack_counts[label]['confidence_sum'] += confidence
+                attack_counts[label]['all_confidences'].append(confidence)
+            
+            # Debug attack type stats
+            for attack_type, stats in attack_counts.items():
+                confidences = stats['all_confidences']
+                logger.info(f"Attack type {attack_type}: Count {stats['count']}, Avg conf: {np.mean(confidences):.2f}%, Min: {np.min(confidences):.2f}%, Max: {np.max(confidences):.2f}%")
             
             # Calculate statistics
             total_flows = len(predicted_labels)
             normal_flows = attack_counts.get('Normal', {}).get('count', 0)
             normal_percentage = (normal_flows / total_flows) * 100 if total_flows > 0 else 0
             
-            # Determine overall status
+            # Use a fixed confidence for testing if needed
+            USE_FIXED_CONFIDENCE = False
+            FIXED_CONFIDENCE = 75.0
+            
+            # Prepare attack types for result with proper confidence calculation
+            attack_types = []
+            for label, stats in attack_counts.items():
+                avg_confidence = stats['confidence_sum'] / stats['count']
+                percentage = (stats['count'] / total_flows) * 100
+                
+                # Override confidence for testing if needed
+                if USE_FIXED_CONFIDENCE and label != 'Normal':
+                    confidence_to_use = FIXED_CONFIDENCE
+                else:
+                    confidence_to_use = avg_confidence
+                    
+                attack_types.append({
+                    'type': label,
+                    'description': self.attack_mapping.get(label, label),
+                    'count': stats['count'],
+                    'percentage': percentage,
+                    'confidence': confidence_to_use
+                })
+            
+            # Sort by percentage
+            attack_types = sorted(attack_types, key=lambda x: x['percentage'], reverse=True)
+            
+            # Determine overall status with 70% confidence threshold
             if normal_percentage >= 95:
                 status = "Normal Traffic"
                 details = "Traffic appears normal (≥95% normal flows)"
@@ -1691,28 +1810,20 @@ class KitsuneNIDSModel:
                 if attack_type_counts:
                     dominant_attack = max(attack_type_counts.items(), key=lambda x: x[1])[0]
                     attack_percentage = (attack_type_counts[dominant_attack] / total_flows) * 100
-                    status = f"Attack Detected: {dominant_attack}"
-                    details = f"{attack_percentage:.1f}% of flows classified as {dominant_attack} attack"
+                    
+                    # Get the average confidence for this attack type
+                    dominant_attack_confidence = attack_counts[dominant_attack]['confidence_sum'] / attack_counts[dominant_attack]['count']
+                    
+                    # Only classify as an attack if confidence > 70%
+                    if dominant_attack_confidence >= 70:
+                        status = f"Attack Detected: {dominant_attack}"
+                        details = f"{attack_percentage:.1f}% of flows classified as {dominant_attack} attack (confidence: {dominant_attack_confidence:.1f}%)"
+                    else:
+                        status = "Uncertain Traffic Pattern"
+                        details = f"Traffic shows patterns similar to {dominant_attack} but with low confidence ({dominant_attack_confidence:.1f}%)"
                 else:
-                    status = "Suspicious Traffic"
-                    details = "Traffic contains suspicious patterns"
-            
-            # Prepare attack types for result
-            attack_types = []
-            for label, stats in attack_counts.items():
-                avg_confidence = stats['confidence_sum'] / stats['count']
-                percentage = (stats['count'] / total_flows) * 100
-                
-                attack_types.append({
-                    'type': label,
-                    'description': self.attack_mapping.get(label, label),
-                    'count': stats['count'],
-                    'percentage': percentage,
-                    'confidence': avg_confidence
-                })
-            
-            # Sort by percentage
-            attack_types = sorted(attack_types, key=lambda x: x['percentage'], reverse=True)
+                    status = "Uncertain Traffic Pattern"
+                    details = "Traffic contains unusual patterns but could not be classified with confidence"
             
             # Prepare result
             result = {
@@ -1729,6 +1840,8 @@ class KitsuneNIDSModel:
             
         except Exception as e:
             logger.error(f"Error during prediction: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return {'error': f'Prediction failed: {str(e)}'}
 
 

@@ -41,6 +41,24 @@ analysis_tasks = {}
 # PATCH: Monkey patch the KitsuneNIDSModel.load_models method to fix the loading issue
 original_load_models = KitsuneNIDSModel.load_models
 
+def convert_numpy_types(obj):
+    """Convert NumPy types to native Python types for JSON serialization"""
+    import numpy as np
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_numpy_types(item) for item in obj)
+    else:
+        return obj
+
 def patched_load_models(self):
     """Patched version of load_models that handles file paths correctly"""
     logger.info("Using patched load_models method")
@@ -213,7 +231,7 @@ def analyze_pcap(file_path, task_id):
         # Update task status with results
         analysis_tasks[task_id]['status'] = 'completed'
         analysis_tasks[task_id]['progress'] = 100
-        analysis_tasks[task_id]['result'] = result
+        analysis_tasks[task_id]['result'] = convert_numpy_types(result)  # Add this conversion
         analysis_tasks[task_id]['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
         logger.info(f"Analysis completed for task {task_id}")
@@ -312,15 +330,18 @@ def get_status(task_id):
     task = analysis_tasks[task_id]
     logger.debug(f"Returning status for task {task_id}: {task['status']}")
     
+    # Convert task dictionary to ensure all values are JSON serializable
+    task_data = convert_numpy_types(task)
+    
     return jsonify({
-        'id': task['id'],
-        'filename': task['filename'],
-        'status': task['status'],
-        'progress': task['progress'],
-        'created_at': task['created_at'],
-        'completed_at': task['completed_at'],
-        'result': task['result'],
-        'error': task['error']
+        'id': task_data['id'],
+        'filename': task_data['filename'],
+        'status': task_data['status'],
+        'progress': task_data['progress'],
+        'created_at': task_data['created_at'],
+        'completed_at': task_data['completed_at'],
+        'result': task_data['result'],
+        'error': task_data['error']
     })
 
 @app.route('/results/<task_id>', methods=['GET'])
@@ -336,14 +357,17 @@ def get_results(task_id):
         logger.warning(f"Attempted to get results for incomplete task {task_id}: {task['status']}")
         return jsonify({'error': 'Analysis not yet completed', 'status': task['status']}), 400
     
+    # Convert task dictionary to ensure all values are JSON serializable
+    task_data = convert_numpy_types(task)
+    
     logger.info(f"Returning results for task {task_id}")
     return jsonify({
-        'id': task['id'],
-        'filename': task['filename'],
-        'status': task['status'],
-        'created_at': task['created_at'],
-        'completed_at': task['completed_at'],
-        'result': task['result']
+        'id': task_data['id'],
+        'filename': task_data['filename'],
+        'status': task_data['status'],
+        'created_at': task_data['created_at'],
+        'completed_at': task_data['completed_at'],
+        'result': task_data['result']
     })
 
 @app.route('/history', methods=['GET'])
